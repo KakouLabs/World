@@ -52,7 +52,7 @@ static void SetParametersForGetWindowedWaveform(int half_window_length,
 //-----------------------------------------------------------------------------
 static void GetWindowedWaveform(const double *x, int x_length, int fs,
     double current_f0, double current_position, int window_type,
-    double window_length_ratio, double *waveform) {
+    double window_length_ratio, double *waveform, RandnState *randn_state) {
   int half_window_length =
     matlab_round(window_length_ratio * fs / current_f0 / 2.0);
 
@@ -67,7 +67,7 @@ static void GetWindowedWaveform(const double *x, int x_length, int fs,
   // F0-adaptive windowing
   for (int i = 0; i <= half_window_length * 2; ++i)
     waveform[i] =
-      x[safe_index[i]] * window[i] + randn() * world::kMySafeGuardMinimum;
+      x[safe_index[i]] * window[i] + randn(randn_state) * world::kMySafeGuardMinimum;
 
   double tmp_weight1 = 0;
   double tmp_weight2 = 0;
@@ -90,15 +90,15 @@ static void GetWindowedWaveform(const double *x, int x_length, int fs,
 //-----------------------------------------------------------------------------
 static void GetCentroid(const double *x, int x_length, int fs,
     double current_f0, int fft_size, double current_position,
-    const ForwardRealFFT *forward_real_fft, double *centroid) {
+    const ForwardRealFFT *forward_real_fft, double *centroid, RandnState *randn_state) {
   for (int i = 0; i < fft_size; ++i) forward_real_fft->waveform[i] = 0.0;
   GetWindowedWaveform(x, x_length, fs, current_f0,
-      current_position, world::kBlackman, 4.0, forward_real_fft->waveform);
+      current_position, world::kBlackman, 4.0, forward_real_fft->waveform, randn_state);
   double power = 0.0;
   for (int i = 0; i <= matlab_round(2.0 * fs / current_f0) * 2; ++i)
     power += forward_real_fft->waveform[i] * forward_real_fft->waveform[i];
   for (int i = 0; i <= matlab_round(2.0 * fs / current_f0) * 2; ++i)
-    forward_real_fft->waveform[i] /= sqrt(power);
+    forward_real_fft->waveform[i] /= MyMaxDouble(world::kEps, sqrt(power));
 
   fft_execute(forward_real_fft->forward_fft);
   double *tmp_real = new double[fft_size / 2 + 1];
@@ -125,14 +125,14 @@ static void GetCentroid(const double *x, int x_length, int fs,
 //-----------------------------------------------------------------------------
 static void GetStaticCentroid(const double *x, int x_length, int fs,
     double current_f0, int fft_size, double current_position,
-    const ForwardRealFFT *forward_real_fft, double *static_centroid) {
+    const ForwardRealFFT *forward_real_fft, double *static_centroid, RandnState *randn_state) {
   double *centroid1 = new double[fft_size / 2 + 1];
   double *centroid2 = new double[fft_size / 2 + 1];
 
   GetCentroid(x, x_length, fs, current_f0, fft_size,
-      current_position - 0.25 / current_f0, forward_real_fft, centroid1);
+      current_position - 0.25 / current_f0, forward_real_fft, centroid1, randn_state);
   GetCentroid(x, x_length, fs, current_f0, fft_size,
-      current_position + 0.25 / current_f0, forward_real_fft, centroid2);
+      current_position + 0.25 / current_f0, forward_real_fft, centroid2, randn_state);
 
   for (int i = 0; i <= fft_size / 2; ++i)
     static_centroid[i] = centroid1[i] + centroid2[i];
@@ -148,10 +148,10 @@ static void GetStaticCentroid(const double *x, int x_length, int fs,
 //-----------------------------------------------------------------------------
 static void GetSmoothedPowerSpectrum(const double *x, int x_length, int fs,
     double current_f0, int fft_size, double current_position,
-    const ForwardRealFFT *forward_real_fft, double *smoothed_power_spectrum) {
+    const ForwardRealFFT *forward_real_fft, double *smoothed_power_spectrum, RandnState *randn_state) {
   for (int i = 0; i < fft_size; ++i) forward_real_fft->waveform[i] = 0.0;
   GetWindowedWaveform(x, x_length, fs, current_f0,
-      current_position, world::kHanning, 4.0, forward_real_fft->waveform);
+      current_position, world::kHanning, 4.0, forward_real_fft->waveform, randn_state);
 
   fft_execute(forward_real_fft->forward_fft);
   for (int i = 0; i <= fft_size / 2; ++i)
@@ -172,7 +172,7 @@ static void GetStaticGroupDelay(const double *static_centroid,
     const double *smoothed_power_spectrum, int fs, double f0,
     int fft_size, double *static_group_delay) {
   for (int i = 0; i <= fft_size / 2; ++i)
-    static_group_delay[i] = static_centroid[i] / smoothed_power_spectrum[i];
+    static_group_delay[i] = static_centroid[i] / MyMaxDouble(world::kEps, smoothed_power_spectrum[i]);
   LinearSmoothing(static_group_delay, f0 / 2.0, fs, fft_size,
       static_group_delay);
 
@@ -204,7 +204,7 @@ static void GetCoarseAperiodicity(const double *static_group_delay, int fs,
   int center;
   for (int i = 0; i < number_of_aperiodicities; ++i) {
     center =
-      static_cast<int>(world::kFrequencyInterval * (i + 1) * fft_size / fs);
+      (int)(world::kFrequencyInterval * (i + 1) * fft_size / fs);
     for (int j = 0; j <= half_window_length * 2; ++j)
       forward_real_fft->waveform[j] =
         static_group_delay[center - half_window_length + j] * window[j];
@@ -217,8 +217,8 @@ static void GetCoarseAperiodicity(const double *static_group_delay, int fs,
     for (int j = 1 ; j <= fft_size / 2; ++j)
       power_spectrum[j] += power_spectrum[j - 1];
     coarse_aperiodicity[i] =
-      10 * log10(power_spectrum[fft_size / 2 - boundary - 1] /
-                 power_spectrum[fft_size / 2]);
+      10 * log10(MyMaxDouble(world::kEps, power_spectrum[fft_size / 2 - boundary - 1]) /
+                 MyMaxDouble(world::kEps, power_spectrum[fft_size / 2]));
   }
   delete[] power_spectrum;
 }
@@ -226,12 +226,12 @@ static void GetCoarseAperiodicity(const double *static_group_delay, int fs,
 static double D4CLoveTrainSub(const double *x, int fs, int x_length,
     double current_f0, double current_position, int f0_length, int fft_size,
     int boundary0, int boundary1, int boundary2,
-    ForwardRealFFT *forward_real_fft) {
+    ForwardRealFFT *forward_real_fft, RandnState *randn_state) {
   double *power_spectrum = new double[fft_size];
 
   int window_length = matlab_round(1.5 * fs / current_f0) * 2 + 1;
   GetWindowedWaveform(x, x_length, fs, current_f0, current_position,
-    world::kBlackman, 3.0, forward_real_fft->waveform);
+    world::kBlackman, 3.0, forward_real_fft->waveform, randn_state);
 
   for (int i = window_length; i < fft_size; ++i)
     forward_real_fft->waveform[i] = 0.0;
@@ -242,10 +242,10 @@ static double D4CLoveTrainSub(const double *x, int fs, int x_length,
     power_spectrum[i] =
     forward_real_fft->spectrum[i][0] * forward_real_fft->spectrum[i][0] +
     forward_real_fft->spectrum[i][1] * forward_real_fft->spectrum[i][1];
-  for (int i = boundary0; i <= boundary2; ++i)
-    power_spectrum[i] += +power_spectrum[i - 1];
+  for (int i = boundary0 + 1; i <= boundary2; ++i)
+    power_spectrum[i] += power_spectrum[i - 1];
 
-  double aperiodicity0 = power_spectrum[boundary1] / power_spectrum[boundary2];
+  double aperiodicity0 = power_spectrum[boundary1] / MyMaxDouble(world::kEps, power_spectrum[boundary2]);
   delete[] power_spectrum;
   return aperiodicity0;
 }
@@ -258,17 +258,17 @@ static double D4CLoveTrainSub(const double *x, int fs, int x_length,
 //-----------------------------------------------------------------------------
 static void D4CLoveTrain(const double *x, int fs, int x_length,
     const double *f0, int f0_length, const double *temporal_positions,
-    double *aperiodicity0) {
+    double *aperiodicity0, RandnState *randn_state) {
   double lowest_f0 = 40.0;
-  int fft_size = static_cast<int>(pow(2.0, 1.0 +
-    static_cast<int>(log(3.0 * fs / lowest_f0 + 1) / world::kLog2)));
+  int fft_size = (int)(pow(2.0, 1.0 +
+    (int)(log(3.0 * fs / lowest_f0 + 1) / world::kLog2)));
   ForwardRealFFT forward_real_fft = { 0 };
   InitializeForwardRealFFT(fft_size, &forward_real_fft);
 
   // Cumulative powers at 100, 4000, 7900 Hz are used for VUV identification.
-  int boundary0 = static_cast<int>(ceil(100.0 * fft_size / fs));
-  int boundary1 = static_cast<int>(ceil(4000.0 * fft_size / fs));
-  int boundary2 = static_cast<int>(ceil(7900.0 * fft_size / fs));
+  int boundary0 = (int)(ceil(100.0 * fft_size / fs));
+  int boundary1 = (int)(ceil(4000.0 * fft_size / fs));
+  int boundary2 = (int)(ceil(7900.0 * fft_size / fs));
   for (int i = 0; i < f0_length; ++i) {
     if (f0[i] == 0.0) {
       aperiodicity0[i] = 0.0;
@@ -276,7 +276,7 @@ static void D4CLoveTrain(const double *x, int fs, int x_length,
     }
     aperiodicity0[i] = D4CLoveTrainSub(x, fs, x_length,
       MyMaxDouble(f0[i], lowest_f0), temporal_positions[i], f0_length,
-      fft_size, boundary0, boundary1, boundary2, &forward_real_fft);
+      fft_size, boundary0, boundary1, boundary2, &forward_real_fft, randn_state);
   }
 
   DestroyForwardRealFFT(&forward_real_fft);
@@ -291,14 +291,14 @@ static void D4CLoveTrain(const double *x, int fs, int x_length,
 static void D4CGeneralBody(const double *x, int x_length, int fs,
     double current_f0, int fft_size, double current_position,
     int number_of_aperiodicities, const double *window, int window_length,
-    const ForwardRealFFT *forward_real_fft, double *coarse_aperiodicity) {
+    const ForwardRealFFT *forward_real_fft, double *coarse_aperiodicity, RandnState *randn_state) {
   double *static_centroid = new double[fft_size / 2 + 1];
   double *smoothed_power_spectrum = new double[fft_size / 2 + 1];
   double *static_group_delay = new double[fft_size / 2 + 1];
   GetStaticCentroid(x, x_length, fs, current_f0, fft_size, current_position,
-      forward_real_fft, static_centroid);
+      forward_real_fft, static_centroid, randn_state);
   GetSmoothedPowerSpectrum(x, x_length, fs, current_f0, fft_size,
-      current_position, forward_real_fft, smoothed_power_spectrum);
+      current_position, forward_real_fft, smoothed_power_spectrum, randn_state);
   GetStaticGroupDelay(static_centroid, smoothed_power_spectrum,
       fs, current_f0, fft_size, static_group_delay);
 
@@ -338,31 +338,32 @@ static void GetAperiodicity(const double *coarse_frequency_axis,
 void D4C(const double *x, int x_length, int fs,
     const double *temporal_positions, const double *f0, int f0_length,
     int fft_size, const D4COption *option, double **aperiodicity) {
-  randn_reseed();
+  RandnState randn_state;
+  randn_reseed(&randn_state);
 
   InitializeAperiodicity(f0_length, fft_size, aperiodicity);
 
-  int fft_size_d4c = static_cast<int>(pow(2.0, 1.0 +
-    static_cast<int>(log(4.0 * fs / world::kFloorF0D4C + 1) /
+  int fft_size_d4c = (int)(pow(2.0, 1.0 +
+    (int)(log(4.0 * fs / world::kFloorF0D4C + 1) /
       world::kLog2)));
 
   ForwardRealFFT forward_real_fft = {0};
   InitializeForwardRealFFT(fft_size_d4c, &forward_real_fft);
 
   int number_of_aperiodicities =
-    static_cast<int>(MyMinDouble(world::kUpperLimit, fs / 2.0 -
+    (int)(MyMinDouble(world::kUpperLimit, fs / 2.0 -
       world::kFrequencyInterval) / world::kFrequencyInterval);
   // Since the window function is common in D4CGeneralBody(),
   // it is designed here to speed up.
   int window_length =
-    static_cast<int>(world::kFrequencyInterval * fft_size_d4c / fs) * 2 + 1;
+    (int)(world::kFrequencyInterval * fft_size_d4c / fs) * 2 + 1;
   double *window =  new double[window_length];
   NuttallWindow(window_length, window);
 
   // D4C Love Train (Aperiodicity of 0 Hz is given by the different algorithm)
   double *aperiodicity0 = new double[f0_length];
   D4CLoveTrain(x, fs, x_length, f0, f0_length, temporal_positions,
-      aperiodicity0);
+      aperiodicity0, &randn_state);
 
   double *coarse_aperiodicity = new double[number_of_aperiodicities + 2];
   coarse_aperiodicity[0] = -60.0;
@@ -375,13 +376,13 @@ void D4C(const double *x, int x_length, int fs,
 
   double *frequency_axis = new double[fft_size / 2 + 1];
   for (int i = 0; i <= fft_size / 2; ++i)
-    frequency_axis[i] = static_cast<double>(i) * fs / fft_size;
+    frequency_axis[i] = (double)i * fs / fft_size;
 
   for (int i = 0; i < f0_length; ++i) {
     if (f0[i] == 0 || aperiodicity0[i] <= option->threshold) continue;
     D4CGeneralBody(x, x_length, fs, MyMaxDouble(world::kFloorF0D4C, f0[i]),
         fft_size_d4c, temporal_positions[i], number_of_aperiodicities, window,
-        window_length, &forward_real_fft, &coarse_aperiodicity[1]);
+        window_length, &forward_real_fft, &coarse_aperiodicity[1], &randn_state);
 
     // Linear interpolation to convert the coarse aperiodicity into its
     // spectral representation.
