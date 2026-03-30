@@ -1,7 +1,7 @@
 //-----------------------------------------------------------------------------
 // Copyright 2012 Masanori Morise
-// Author: mmorise [at] meiji.ac.jp (Masanori Morise)
-// Last update: 2021/02/15
+// Author: mmorise [at] yamanashi.ac.jp (Masanori Morise)
+// Last update: 2017/02/01
 //
 // Spectral envelope estimation on the basis of the idea of CheapTrick.
 //-----------------------------------------------------------------------------
@@ -111,7 +111,7 @@ static void SetParametersForGetWindowedWaveform(int half_window_length,
 //-----------------------------------------------------------------------------
 static void GetWindowedWaveform(const double *x, int x_length, int fs,
     double current_f0, double currnet_position,
-    const ForwardRealFFT *forward_real_fft, RandnState *randn_state) {
+    const ForwardRealFFT *forward_real_fft) {
   int half_window_length = matlab_round(1.5 * fs / current_f0);
 
   int *base_index = new int[half_window_length * 2 + 1];
@@ -125,7 +125,7 @@ static void GetWindowedWaveform(const double *x, int x_length, int fs,
   double *waveform = forward_real_fft->waveform;
   for (int i = 0; i <= half_window_length * 2; ++i)
     waveform[i] = x[safe_index[i]] * window[i] +
-      randn(randn_state) * world::kMySafeGuardMinimum;
+      randn() * world::kMySafeGuardMinimum;
   double tmp_weight1 = 0;
   double tmp_weight2 = 0;
   for (int i = 0; i <= half_window_length * 2; ++i) {
@@ -145,9 +145,9 @@ static void GetWindowedWaveform(const double *x, int x_length, int fs,
 // AddInfinitesimalNoise()
 //-----------------------------------------------------------------------------
 static void AddInfinitesimalNoise(const double *input_spectrum, int fft_size,
-    double *output_spectrum, RandnState *randn_state) {
+    double *output_spectrum) {
   for (int i = 0; i <= fft_size / 2; ++i)
-    output_spectrum[i] = input_spectrum[i] + fabs(randn(randn_state)) * world::kEps;
+    output_spectrum[i] = input_spectrum[i] + fabs(randn()) * world::kEps;
 }
 
 //-----------------------------------------------------------------------------
@@ -159,10 +159,10 @@ static void AddInfinitesimalNoise(const double *input_spectrum, int fft_size,
 static void CheapTrickGeneralBody(const double *x, int x_length, int fs,
     double current_f0, int fft_size, double current_position, double q1,
     const ForwardRealFFT *forward_real_fft,
-    const InverseRealFFT *inverse_real_fft, double *spectral_envelope, RandnState *randn_state) {
+    const InverseRealFFT *inverse_real_fft, double *spectral_envelope) {
   // F0-adaptive windowing
   GetWindowedWaveform(x, x_length, fs, current_f0, current_position,
-      forward_real_fft, randn_state);
+      forward_real_fft);
 
   // Calculate power spectrum with DC correction
   // Note: The calculated power spectrum is stored in an array for waveform.
@@ -179,7 +179,7 @@ static void CheapTrickGeneralBody(const double *x, int x_length, int fs,
   // Add infinitesimal noise
   // This is a safeguard to avoid including zero in the spectrum.
   AddInfinitesimalNoise(forward_real_fft->waveform, fft_size,
-      forward_real_fft->waveform, randn_state);
+      forward_real_fft->waveform);
 
   // Smoothing (log axis) and spectral recovery on the cepstrum domain.
   SmoothingWithRecovery(current_f0, fs, fft_size, q1, forward_real_fft,
@@ -202,8 +202,7 @@ void CheapTrick(const double *x, int x_length, int fs,
     const CheapTrickOption *option, double **spectrogram) {
   int fft_size = option->fft_size;
 
-  RandnState randn_state = {};
-  randn_reseed(&randn_state);
+  randn_reseed();
 
   double f0_floor = GetF0FloorForCheapTrick(fs, fft_size);
   double *spectral_envelope = new double[fft_size];
@@ -218,7 +217,7 @@ void CheapTrick(const double *x, int x_length, int fs,
     current_f0 = f0[i] <= f0_floor ? world::kDefaultF0 : f0[i];
     CheapTrickGeneralBody(x, x_length, fs, current_f0, fft_size,
         temporal_positions[i], option->q1, &forward_real_fft,
-        &inverse_real_fft, spectral_envelope, &randn_state);
+        &inverse_real_fft, spectral_envelope);
     for (int j = 0; j <= fft_size / 2; ++j)
       spectrogram[i][j] = spectral_envelope[j];
   }
@@ -237,4 +236,71 @@ void InitializeCheapTrickOption(int fs, CheapTrickOption *option) {
   // knowledge of the signal processing in CheapTrick.
   option->f0_floor = world::kFloorF0;
   option->fft_size = GetFFTSizeForCheapTrick(fs, option);
+}
+
+void CheapTrickFromSpectrum(const double *power_spectrum, int fs,
+    const double *f0, int f0_length, const CheapTrickOption *option,
+    double **spectrogram) {
+  int fft_size = option->fft_size;
+
+  double f0_floor = GetF0FloorForCheapTrick(fs, fft_size);
+  double *spectral_envelope = new double[fft_size];
+  double *smoothed_power = new double[fft_size];
+  double *smoothing_lifter = new double[fft_size];
+  double *compensation_lifter = new double[fft_size];
+
+  InverseRealFFT inverse_real_fft = { 0 };
+  InitializeInverseRealFFT(fft_size, &inverse_real_fft);
+
+  for (int i = 0; i < f0_length; ++i) {
+    double current_f0 = f0[i] <= f0_floor ? world::kDefaultF0 : f0[i];
+    int offset = i * (fft_size / 2 + 1);
+
+    for (int j = 0; j <= fft_size / 2; ++j) {
+      smoothed_power[j] = power_spectrum[offset + j];
+    }
+
+    LinearSmoothing(smoothed_power, current_f0 * 2.0 / 3.0, fs, fft_size,
+        smoothed_power);
+
+    AddInfinitesimalNoise(smoothed_power, fft_size, smoothed_power);
+
+    for (int j = 0; j <= fft_size / 2; ++j) {
+      inverse_real_fft.spectrum[j][0] = log(smoothed_power[j]);
+      inverse_real_fft.spectrum[j][1] = 0.0;
+    }
+    for (int j = 1; j < fft_size / 2; ++j) {
+      inverse_real_fft.spectrum[fft_size - j][0] =
+        inverse_real_fft.spectrum[j][0];
+      inverse_real_fft.spectrum[fft_size - j][1] = 0.0;
+    }
+    fft_execute(inverse_real_fft.inverse_fft);
+
+    smoothing_lifter[0] = 1.0;
+    compensation_lifter[0] = (1.0 - 2.0 * option->q1) + 2.0 * option->q1;
+    for (int j = 1; j <= fft_size / 2; ++j) {
+      double quefrency = (double)j / fs;
+      smoothing_lifter[j] = sin(world::kPi * current_f0 * quefrency) /
+        (world::kPi * current_f0 * quefrency);
+      compensation_lifter[j] = (1.0 - 2.0 * option->q1) + 2.0 * option->q1 *
+        cos(2.0 * world::kPi * quefrency * current_f0);
+    }
+
+    for (int j = 0; j <= fft_size / 2; ++j) {
+      inverse_real_fft.spectrum[j][0] = inverse_real_fft.spectrum[j][0] *
+        smoothing_lifter[j] * compensation_lifter[j] / fft_size;
+      inverse_real_fft.spectrum[j][1] = 0.0;
+    }
+    fft_execute(inverse_real_fft.inverse_fft);
+
+    for (int j = 0; j <= fft_size / 2; ++j) {
+      spectrogram[i][j] = exp(inverse_real_fft.waveform[j]);
+    }
+  }
+
+  DestroyInverseRealFFT(&inverse_real_fft);
+  delete[] spectral_envelope;
+  delete[] smoothed_power;
+  delete[] smoothing_lifter;
+  delete[] compensation_lifter;
 }

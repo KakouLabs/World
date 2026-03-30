@@ -1,7 +1,7 @@
 //-----------------------------------------------------------------------------
 // Copyright 2012 Masanori Morise
-// Author: mmorise [at] meiji.ac.jp (Masanori Morise)
-// Last update: 2021/02/15
+// Author: mmorise [at] yamanashi.ac.jp (Masanori Morise)
+// Last update: 2017/02/01
 //-----------------------------------------------------------------------------
 #ifndef WORLD_CHEAPTRICK_H_
 #define WORLD_CHEAPTRICK_H_
@@ -78,6 +78,25 @@ int GetFFTSizeForCheapTrick(int fs, const CheapTrickOption *option);
 //   Lower f0 limit (Hz)
 //-----------------------------------------------------------------------------
 double GetF0FloorForCheapTrick(int fs, int fft_size);
+
+//-----------------------------------------------------------------------------
+// CheapTrickFromSpectrum() calculates spectral envelopes from pre-computed
+// power spectrum. This is an optimized version that skips the windowing and
+// FFT steps for GPU acceleration.
+//
+// Input:
+//   power_spectrum     : Pre-computed power spectrum (f0_length x fft_size/2+1)
+//   fs                : Sampling frequency
+//   f0                : F0 contour
+//   f0_length         : Length of F0 contour
+//   option            : CheapTrick options (q1, f0_floor, fft_size)
+//
+// Output:
+//   spectrogram        : Spectral envelopes (f0_length x fft_size/2+1)
+//-----------------------------------------------------------------------------
+void CheapTrickFromSpectrum(const double *power_spectrum, int fs,
+    const double *f0, int f0_length, const CheapTrickOption *option,
+    double **spectrogram);
 
 WORLD_END_C_DECLS
 
